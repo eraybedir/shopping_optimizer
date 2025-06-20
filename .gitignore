@@ -24,13 +24,23 @@ wheels/
 # Virtual Environment
 venv/
 ENV/
+env/
+.venv/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
-Thumbs.db 
+Thumbs.db
+desktop.ini
+
+# Project specific
+*.log
+*.tmp
+*.temp
+shopping_output.txt 
