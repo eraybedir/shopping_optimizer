@@ -1,6 +1,8 @@
 import pandas as pd
 from pulp import LpProblem, LpVariable, lpSum, LpMinimize, LpStatus, value
+from pulp import PULP_CBC_CMD
 import re
+import os
 
 # --- Category Mapping ---
 def map_main_group(row):
@@ -103,17 +105,17 @@ def calculate_tdee(age, gender, weight, height, activity):
 # --- Macro Targets ---
 def get_macro_targets(tdee, goal):
     if "gain" in goal:
-        tdee += 300
+        tdee += 200
     elif "lose" in goal:
-        tdee -= 300
+        tdee -= 200
     if "sport" in goal:
-        protein_ratio = 0.25
+        protein_ratio = 0.20
         fat_ratio = 0.25
-        carb_ratio = 0.5
+        carb_ratio = 0.55
     else:
-        protein_ratio = 0.2
-        fat_ratio = 0.3
-        carb_ratio = 0.5
+        protein_ratio = 0.15
+        fat_ratio = 0.25
+        carb_ratio = 0.60
     protein_g = (tdee * protein_ratio) / 4
     fat_g = (tdee * fat_ratio) / 9
     carb_g = (tdee * carb_ratio) / 4
@@ -132,6 +134,14 @@ def extract_weight(name):
 
 # --- Optimization ---
 def optimize_shopping(df, tdee, protein_g, fat_g, carb_g, budget, days=30):
+    print(f"\nOptimization parameters:")
+    print(f"Budget: {budget} TL")
+    print(f"Required calories: {tdee * days:.0f} kcal")
+    print(f"Required protein: {protein_g * days:.0f} g")
+    print(f"Required fat: {fat_g * days:.0f} g")
+    print(f"Required carbs: {carb_g * days:.0f} g")
+    print(f"Available products: {len(df)}")
+    
     prob = LpProblem("ShoppingList", LpMinimize)
     n = len(df)
     # Integer variables: number of items to buy (max 5)
@@ -143,6 +153,8 @@ def optimize_shopping(df, tdee, protein_g, fat_g, carb_g, budget, days=30):
     prob += lpSum([items[i] * df.iloc[i]["protein"] for i in range(n)]) >= protein_g * days
     prob += lpSum([items[i] * df.iloc[i]["fat"] for i in range(n)]) >= fat_g * days
     prob += lpSum([items[i] * df.iloc[i]["carbs"] for i in range(n)]) >= carb_g * days
+    # Budget constraint: use at least 70% of budget
+    prob += lpSum([items[i] * df.iloc[i]["price"] for i in range(n)]) >= budget * 0.70
     prob += lpSum([items[i] * df.iloc[i]["price"] for i in range(n)]) <= budget
     # Category diversity: at least 1 from each main group
     for group in ['vegetables', 'fruits', 'dairy', 'legumes', 'meat_fish', 'grains']:
@@ -151,23 +163,28 @@ def optimize_shopping(df, tdee, protein_g, fat_g, carb_g, budget, days=30):
             prob += lpSum([items[i] for i in indices]) >= 1
     # Maximum total weight: 50kg
     prob += lpSum([items[i] * df.iloc[i]["weight_g"] for i in range(n)]) <= 50000
-    # At least 15 different items
+    # Maximum 200 products total
+    prob += lpSum([items[i] for i in range(n)]) <= 200
+    # At least 10 different items
     y = [LpVariable(f"y_{i}", cat='Binary') for i in range(n)]
     for i in range(n):
         prob += items[i] >= y[i]
-    prob += lpSum(y) >= 15
-    prob.solve()
+    prob += lpSum(y) >= 10
+    prob.solve(PULP_CBC_CMD(msg=False))
     if LpStatus[prob.status] != "Optimal":
         print("No feasible shopping list found within budget and constraints.")
         return
     total_cost = sum([value(items[i]) * df.iloc[i]["price"] for i in range(n)])
     total_weight = sum([value(items[i]) * df.iloc[i]["weight_g"] for i in range(n)])
+    total_items = sum([value(items[i]) for i in range(n)])
     print("\nRecommended Shopping List:")
     for i, var in enumerate(items):
         qty = value(var)
         if qty and qty >= 1:
             print(f"{df.iloc[i]['name']} ({df.iloc[i]['market']}): {int(qty)} adet - {df.iloc[i]['price']*qty:.2f} TL, {df.iloc[i]['weight_g']*qty/1000:.2f} kg")
-    print(f"\nTotal cost: {total_cost:.2f} TL, Total weight: {total_weight/1000:.2f} kg")
+    print(f"\nTotal cost: {total_cost:.2f} TL ({total_cost/budget*100:.1f}% of budget)")
+    print(f"Total weight: {total_weight/1000:.2f} kg")
+    print(f"Total items: {int(total_items)}")
 
 # --- Main ---
 def main():
@@ -189,14 +206,44 @@ def main():
     # Map to main food groups
     df['main_group'] = df.apply(map_main_group, axis=1)
     
+    # Filter out very expensive items (over 1000 TL)
+    df = df[df['price'] <= 1000]
+    
+    # Filter out products with zero calories
+    df = df[df['calories'] > 0]
+    
+    print(f"Data loaded: {len(df)} products available")
+    print(f"Price range: {df['price'].min():.2f} - {df['price'].max():.2f} TL")
+    print(f"Calories range: {df['calories'].min():.0f} - {df['calories'].max():.0f} kcal")
+    print(f"Average price: {df['price'].mean():.2f} TL")
+    print(f"Average calories: {df['calories'].mean():.0f} kcal")
+    
     # Get user inputs
     age, gender, weight, height, activity, goal, budget = get_user_input()
     days = 30  # Fixed at 30 days
     
     tdee = calculate_tdee(age, gender, weight, height, activity)
     tdee, protein_g, fat_g, carb_g = get_macro_targets(tdee, goal)
-    print(f"\nTarget Calories: {tdee*days:.0f} kcal, Protein: {protein_g*days:.0f}g, Fat: {fat_g*days:.0f}g, Carbs: {carb_g*days:.0f}g (for {days} days)")
+    output_lines = []
+    output_lines.append(f"Target Calories: {tdee*days:.0f} kcal, Protein: {protein_g*days:.0f}g, Fat: {fat_g*days:.0f}g, Carbs: {carb_g*days:.0f}g (for {days} days)\n")
+    
+    # Capture the print output of optimize_shopping
+    import io
+    import sys
+    buffer = io.StringIO()
+    sys_stdout = sys.stdout
+    sys.stdout = buffer
     optimize_shopping(df, tdee, protein_g, fat_g, carb_g, budget, days=days)
+    sys.stdout = sys_stdout
+    output_lines.append(buffer.getvalue())
+    
+    # Delete existing file if it exists
+    if os.path.exists("shopping_output.txt"):
+        os.remove("shopping_output.txt")
+    
+    with open("shopping_output.txt", "w", encoding="utf-8") as f:
+        f.writelines(output_lines)
+    print("Results saved to shopping_output.txt")
 
 if __name__ == "__main__":
     main() 
